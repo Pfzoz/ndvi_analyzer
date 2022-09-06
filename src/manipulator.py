@@ -1,21 +1,12 @@
-from xxlimited import foo
+from genericpath import isdir
 import rasterio
 from rasterio import mask
 import geopandas as gpd
 from shapely.geometry import *
 import fiona
+import os
 
 fiona.drvsupport.supported_drivers['LIBKML'] = 'rw' # Only way for geopandas to read .kml
-
-kmlGDF = gpd.read_file("assets/geodata/region2_kml/milho123.kml") # polygon-containing kml file.
-
-bluePath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B02_10m.jp2"
-greenPath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B03_10m.jp2"
-redPath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B04_10m.jp2"
-
-print(kmlGDF) # The CRS of this geometry is 4326
-
-## The polygon in the kml file is a 3D shape, here there is a function created by Rauni: https://gis.stackexchange.com/users/14466/rauni to reshape it.
 
 def remove_third_dimension(geom):
     
@@ -78,6 +69,98 @@ def remove_third_dimension(geom):
 
     else:
         raise RuntimeError("Currently this type of geometry is not supported: {}".format(type(geom)))
+
+def get_all_subdirs(_path : str, include_dir : bool=True):
+    returnPaths = []
+    if _path[-1] != "/" and _path[-1] != "\\":
+        _path = _path + "/"
+    for path in os.listdir(_path):
+        if os.path.isdir(_path+path):
+            if include_dir:
+                returnPaths.append(_path+path)
+            returnPaths.extend(get_all_subdirs(_path+path, include_dir))
+        else:
+            returnPaths.append(_path+path)
+    return returnPaths
+
+for kmlPath in os.listdir("assets/geodata/imagery"):
+    kmlGDF = gpd.read_file("assets/geodata/kml/"+kmlPath.split("/")[-1]+".kml")
+
+    bluePath, greenPath, redPath = (None, None, None)
+
+    for path in get_all_subdirs("assets/geodata/imagery/"+kmlPath):
+        if "B02" in path:
+            bluePath = path
+        elif "B03" in path:
+            greenPath = path
+        elif "B04" in path:
+            redPath = path
+    
+    print("-->Processing "+kmlPath+" rasters.")
+
+    for i, shape in enumerate(kmlGDF["geometry"]):
+        kmlGDF.at[i, "geometry"] = remove_third_dimension(kmlGDF.at[i, "geometry"])
+        
+
+    footprint = kmlGDF.at[i, "geometry"]
+
+    b2 = rasterio.open(bluePath)
+    b3 = rasterio.open(greenPath)
+    b4 = rasterio.open(redPath)
+
+    print("-->Creating RGB raster ("+kmlPath+")")
+
+    if not os.path.exists("assets/geodata/imagery/"+kmlPath+"/output"):
+        os.mkdir("assets/geodata/imagery/"+kmlPath+"/output")
+
+    with rasterio.open("assets/geodata/imagery/"+kmlPath+"/output/RGB.tif"
+        , 'w', driver="GTiff", width=b4.width, height=b4.height, count=3, 
+        crs=b4.crs, transform=b4.transform, dtype=b4.dtypes[0], photometric="RGB") as rgb:
+        rgb.write(b2.read(1), 1)
+        rgb.write(b3.read(1), 2)
+        rgb.write(b4.read(1), 3)
+        rgb.close()
+    
+    print("-->"+kmlPath+" CRS = epsg:"+str(b4.crs).split(":")[-1])
+
+    kmlProjection = kmlGDF.to_crs({"init": "epsg:"+str(b4.crs).split(":")[-1]})
+
+    with rasterio.open("assets/geodata/imagery/"+kmlPath+"/output/RGB.tif") as src:
+        outImage, outTransform = mask.mask(src, kmlProjection.geometry, crop=True)
+        outMeta = src.meta.copy()
+        outMeta.update(
+            {
+                "driver": "GTiff",
+                "height": outImage.shape[1],
+                "width": outImage.shape[2],
+                "transform": outTransform
+            }
+        )
+
+    print("-->Creating mask ("+kmlPath+")")
+
+    with rasterio.open("assets/geodata/imagery/"+kmlPath+"/output/RGB_masked.tif", 'w',
+        **outMeta, photometric="RGB") as dest:
+        dest.write(outImage)
+    
+    dest.close()
+    src.close()
+
+
+exit(0)
+    
+
+kmlGDF = gpd.read_file("assets/geodata/region2_kml/milho123.kml") # polygon-containing kml file.
+
+bluePath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B02_10m.jp2"
+greenPath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B03_10m.jp2"
+redPath = "assets/geodata/dump_milho123/input/T22JCP_20220512T133231_B04_10m.jp2"
+
+print(kmlGDF) # The CRS of this geometry is 4326
+
+## The polygon in the kml file is a 3D shape, here there is a function created by Rauni: https://gis.stackexchange.com/users/14466/rauni to reshape it.
+
+
 
 for i, shape in enumerate(kmlGDF["geometry"]):
     print("\n--> 3D Polygon\n", kmlGDF.at[i, "geometry"])
